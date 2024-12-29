@@ -1,0 +1,456 @@
+---
+title: "Data Analysis"
+author: "Kyrylo Stadniuk"
+date: "2024-12-25"
+output: pdf
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(glmnet)
+library(pander)
+library(psych)
+library(corrplot)
+library(MASS)  # For LDA
+library(ggplot2)
+library(plotly)
+library(factoextra)
+library(cluster)
+library(dplyr)
+library(class)      # For KNN
+library(caret)      # For cross-validation
+library(dbscan)
+library(pROC)
+library(precrec)# precision-recall curve
+library(e1071) # SVM
+library(mlr)
+library(randomForest)
+library(gbm)
+
+```
+
+```{r load}
+data_folder = "~/University/Ing./SAN/Semestral Project/Data Analysis/Clean Data"
+heart_stat <- read.csv(file.path(data_folder, "heart_stat.csv"), sep = ",")
+heart_data <- read.csv(file.path(data_folder, "heart_data.csv"), sep = ",")
+heart_2020 <- read.csv(file.path(data_folder, "heart_2020.csv"), sep = ",")
+heart_2022 <- read.csv(file.path(data_folder, "heart_2022.csv"), sep = ",")
+```
+
+```{r}
+head(heart_stat)
+head(heart_data)
+head(heart_2020)
+head(heart_2022)
+```
+
+## Descriptive Statistics
+
+### heart_stat
+
+Let us look at the target value distribution. This is very important for the binary classification.
+```{r}
+barplot(table(heart_stat$target), col = "skyblue", main = "Distribution of Target Variable")
+```
+Well, surprisingly, the categories are more or less balanced. If they weren't we would need to remove some instances so that they were more balanced or use models that deal with imbalanced datasets (as Weighted Logistic Regression), as the imbalanced dataset would hinder the model's ability to properly classify.
+
+#### Feature Selection
+Let us apply the L1 regularization and see which features are important.
+
+```{r}
+X <- as.matrix(heart_stat[, !colnames(heart_stat) %in% "target"])
+y <- heart_stat$target
+
+cv_lasso <- cv.glmnet(X, y, alpha = 1)
+
+# Extract coefficients at lambda.min
+coef_lasso <- coef(cv_lasso, s = "lambda.min")  # Works because cv.glmnet() provides lambda.min
+print(coef_lasso)
+```
+Ok, so all features except for `resting.ecg` are important in `heart_stat`. Let us drop it and look at the descriptive statistics.
+
+#### Statistics
+```{r}
+heart_stat_imp <- heart_stat[, !colnames(heart_stat) %in% "resting.ecg"]
+X <- X[, !colnames(X) %in% "resting.ecg"]
+
+stats <- psych::describe(heart_stat_imp)
+stats <- stats[, !colnames(heart_stat_imp) %in% c("n", "vars")]
+
+print(pander(stats, split.tables = Inf))
+
+```
+table description..... (focus more on the cols you don't know and tell how they characterize the dataset)
+
+#### Correlation Table
+```{r}
+corr = as.matrix(cor(X))
+print(corr)
+
+print(max(corr[corr != 1])) # highest `r` except for 1
+corrplot(corr)
+```
+There are no highly correlated variables, as that was already dealt with before. There are only moderately correlated features with the highest `r` being `0.522`, which is unlikely to cause problems.
+
+### Visualization
+
+```{r}
+scaled_data <- scale(X)
+```
+
+
+#### LDA
+
+```{r}
+data <- heart_stat_imp
+data$target <- as.factor(data$target)
+
+lda_model <- lda(target ~ ., data = data)
+
+lda_values <- predict(lda_model)
+
+lda_df <- data.frame(lda_values$x, target = data$target)
+
+ggplot(lda_df, aes(x = LD1, y = 0, color = target)) +
+  geom_jitter(height = 0.1, width = 0.2, size = 3, alpha = 0.8) +
+  labs(title = "LDA Clusters") +
+  theme_minimal()
+
+ggplot(lda_df, aes(x = LD1, color = target)) +
+  geom_density() +
+  labs(title = "LDA Density Plot") +
+  theme_minimal()
+```
+- Both on the cluster (or rather scatter) plot and the density plot we can see the overlap of two categories.
+
+#### PCA
+
+```{r}
+pca <- prcomp(scaled_data)
+
+pca_df <- data.frame(PC1 = pca$x[, 1], 
+                     PC2 = pca$x[, 2], 
+                     Target = heart_stat_imp$target)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = as.factor(Target))) +
+  geom_point(size = 3) +
+  labs(title = "PCA Visualization", x = "PC1", y = "PC2") +
+  theme_minimal()
+
+plot_ly(data = pca_df, 
+        x = ~PC1, 
+        y = ~PC2, 
+        z = ~pca$x[, 3],  # PC3 for 3D plot
+        color = ~as.factor(Target),
+        colors = c('red', 'blue')) %>%
+  add_markers(marker = list(size = 3)) %>%
+  layout(title = "3D PCA Visualization",
+         scene = list(xaxis = list(title = "PC1"),
+                      yaxis = list(title = "PC2"),
+                      zaxis = list(title = "PC3")))
+```
+
+
+### Clustering
+
+#### K-Means
+```{r}
+fviz_nbclust(scaled_data, kmeans, method = "wss")
+
+kmeans_model <- kmeans(scaled_data, centers = 2)
+clusters <- kmeans_model$cluster
+
+pca <- prcomp(scaled_data)  # Perform PCA for dimensionality reduction
+
+plot_ly(x = pca$x[, 1], 
+        y = pca$x[, 2], 
+        z = pca$x[, 3], 
+        color = ~factor(clusters),  # Color by cluster
+        colors = c('red', 'blue', 'green')) %>%
+  add_markers(marker = list(size = 3)) %>%  # Set point size
+  layout(title = "3D Cluster K-means Visualization",
+         scene = list(xaxis = list(title = "PC1"),
+                      yaxis = list(title = "PC2"),
+                      zaxis = list(title = "PC3")))
+```
+The elbow point is 2. 
+
+
+#### DBSCAN
+```{r}
+set.seed(123)
+
+# Cross-validation to find optimal k
+ctrl <- trainControl(method = "cv", number = 10)  # 10-fold CV
+knn_fit <- caret::train(scaled_data, as.factor(y),
+                 method = "knn",
+                 tuneGrid = expand.grid(k = 1:20),  # Test k values from 1 to 20
+                 trControl = ctrl)
+
+# View best k
+print(knn_fit$bestTune)
+plot(knn_fit)
+```
+$k=16$ seems to be optimal for our dataset of size 848.
+
+
+```{r}
+# Estimating the epsilon with the elbow method
+kNNdistplot(scaled_data, k = 16)
+abline(h = 3.6, col = "red", lty = 2)
+
+db <- dbscan(scaled_data, eps = 3.6, minPts = 15)
+print(db)
+pca <- prcomp(scaled_data)
+db_df <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], Cluster = factor(db$cluster))
+
+ggplot(db_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(size = 3) +
+  labs(title = "DBSCAN Clustering", x = "PC1", y = "PC2") +
+  theme_minimal()
+
+plot_ly(data = db_df,
+        x = ~PC1, y = ~PC2, z = ~pca$x[, 3],
+        color = ~Cluster, colors = c('red', 'blue', 'green', 'gray')) %>%
+  add_markers() %>%
+  layout(title = "3D DBSCAN Clustering",
+         scene = list(xaxis = list(title = "PC1"),
+                      yaxis = list(title = "PC2"),
+                      zaxis = list(title = "PC3")))
+```
+DBSCAN is not the best choice for our dataset, as our dataset has nothing to do with density. We played around with different $\epsilon$ and `minPts` values and were unable to see meaningful clusters. The 'elbow' epsilon was 2.5 to 3.6, depending on the choice of $k$ for the knn estimation, and that created one single cluster, which makes sense, as visually there is one dense cluster. Considering the fact that we do binary classification, our task is to find the best decision boundary, not density clusters. Nevertheless, it was still important to see that first-hand.
+
+## Statistical Modelling
+
+## LDA
+We already trained it so let us look at the performance:
+```{r}
+lda_pred <- predict(lda_model)  # Predict class and probabilities
+pred_class <- lda_pred$class   # Predicted classes
+conf_matrix <- confusionMatrix(pred_class, as.factor(heart_stat_imp$target))
+print(conf_matrix)
+
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1-Score:", f1, "\n")
+```
+
+```{r}
+importance <- abs(lda_model$scaling)
+lda_importance_df <- data.frame(Feature = rownames(importance), Importance = importance[, 1])
+lda_importance_df <- lda_importance_df[order(-lda_importance_df$Importance), ]
+print(lda_importance_df)
+
+f_values <- apply(scaled_data[, -ncol(scaled_data)], 2, function(x) {
+  summary(aov(x ~ y))[[1]][["F value"]][1]
+})
+
+lda_importance_df_f <- data.frame(Feature = names(f_values), F_stat = f_values)
+lda_importance_df_f <- lda_importance_df_f[order(-lda_importance_df_f$F_stat), ]
+print(lda_importance_df_f)
+```
+
+### Logistic Regression
+
+```{r}
+#data <- heart_stat_imp  # Replace with your dataset
+#data$target <- as.factor(data$target)  # Ensure target is a factor for binary classification
+
+# Scale features (optional, but recommended for consistency)
+#scaled_data <- scale(data[, -ncol(data)])  # Exclude target
+data <- data.frame(scaled_data, target = y)  # Combine scaled data with target
+
+lr_model <- glm(target ~ ., data = data, family = binomial)  # Logistic regression
+summary(lr_model)
+
+```
+
+#### Model Evaluation
+```{r}
+pred_probs <- predict(lr_model, type = "response")  # Get probabilities
+pred_class <- ifelse(pred_probs > 0.5, 1, 0)     # Threshold at 0.5
+
+confusionMatrix(as.factor(pred_class), as.factor(data$target))
+
+#roc_curve <- roc(data$target, pred_probs)
+#plot(roc_curve, col = "blue", main = "ROC Curve")
+#auc(roc_curve)  # AUC score
+
+eval <- evalmod(scores = pred_probs, labels = as.numeric(data$target))
+
+# Plot Precision-Recall Curve
+autoplot(eval)
+```
+AUC is 0.975 - not bad.
+
+```{r}
+coef_values <- coef(lr_model)
+
+importance <- abs(coef_values[-1])
+lr_importance_df <- data.frame(Feature = names(importance), Importance = importance)
+
+# Sort by importance
+lr_importance_df <- lr_importance_df[order(-lr_importance_df$Importance), ]
+print(lr_importance_df)
+summary(lr_model)
+```
+
+
+
+### SVM
+( I was unable to calculate the feature importance for SVM, so just ignore it ;) )
+```{r}
+# Ensure target is a factor for classification
+#data <- heart_stat_imp
+#data$target <- as.factor(data$target)
+
+# Scale features (recommended for SVM)
+#scaled_data <- scale(data[, -ncol(data)])  # Exclude target
+
+scaled_data <- scale(X)
+data <- data.frame(scaled_data, target = y)
+
+# Train SVM with radial basis function (RBF) kernel
+svm_model <- svm(target ~ ., data = data, kernel = "radial", probability = TRUE)
+
+# View Model Summary
+summary(svm_model)
+```
+
+#### Model Evaluation
+```{r}
+pred_probs <- predict(svm_model, data, probability = TRUE)  # Predicted classes
+pred_class <- as.factor(pred_class)                         # Convert to factor
+
+conf_matrix <- confusionMatrix(pred_class, data$target)
+print(conf_matrix$overall['Accuracy'])
+
+prob_values <- attr(pred_probs, "probabilities")[, 2]  # Get probabilities for class 1
+#roc_curve <- roc(data$target, prob_values)
+#plot(roc_curve, col = "blue", main = "ROC Curve")
+#auc_value <- auc(roc_curve)
+#print(auc_value)
+
+eval <- evalmod(scores = prob_values, labels = as.numeric(data$target))
+autoplot(eval)
+```
+Feature importance
+```{r}
+
+```
+
+
+
+### Random Forest
+
+```{r}
+#data <- heart_stat_imp
+#data$target <- as.factor(data$target)  # Ensure target is a factor for classification
+
+# Scale features (optional for consistency)
+#scaled_data <- scale(data[, -ncol(data)])  # Exclude target column
+#data <- data.frame(scaled_data, target = data$target)  # Recombine scaled data with target
+
+set.seed(123)  # For reproducibility
+data$target = as.factor(data$target)
+rf_model <- randomForest(target ~ ., data = data, ntree = 5, mtry = sqrt(ncol(data) - 1))
+
+# View Model Summary
+print(rf_model)
+```
+#### Model Evaluation
+```{r}
+pred_class <- predict(rf_model, data)  # Predict class labels
+conf_matrix <- confusionMatrix(pred_class, data$target)
+print(conf_matrix$overall['Accuracy'])
+
+pred_probs <- predict(rf_model, data, type = "prob")[, 2]  # Probabilities for class 1
+roc_curve <- roc(data$target, pred_probs)
+plot(roc_curve, col = "blue", main = "ROC Curve")
+#auc(roc_curve)  # Calculate AUC
+
+eval <- evalmod(scores = pred_probs, labels = as.numeric(data$target))
+autoplot(eval)
+```
+```{r}
+importance(rf_model)  # Numerical importance
+varImpPlot(rf_model)  # Visualize importance
+```
+
+
+### Gradient Boosted Model
+
+```{r}
+
+# Load and preprocess data
+data <- heart_stat_imp
+#data$target <- as.factor(data$target)  # Ensure target is a factor
+data$target <- as.numeric(as.character(data$target))  # Convert to numeric 0/1
+
+# Scale features (optional)
+scaled_data <- scale(data[, -ncol(data)])  # Exclude target
+data <- data.frame(scaled_data, target = data$target)
+
+
+
+set.seed(123)  # For reproducibility
+
+# Train GBM Model
+gbm_model <- gbm(target ~ ., 
+                 data = data, 
+                 distribution = "bernoulli",  # Binary classification
+                 n.trees = 1000,             # Number of trees
+                 interaction.depth = 3,      # Depth of trees
+                 shrinkage = 0.01,           # Learning rate
+                 n.minobsinnode = 10,        # Minimum observations per node
+                 cv.folds = 5,               # Cross-validation
+                 verbose = FALSE)
+
+# Print model summary
+summary(gbm_model)  # Shows variable importance
+```
+#### Model Evaluation
+```{r}
+pred_probs <- predict(gbm_model, data, n.trees = gbm_model$n.trees, type = "response")
+pred_class <- ifelse(pred_probs > 0.5, 1, 0)
+
+
+roc_curve <- roc(data$target, pred_probs)
+plot(roc_curve, col = "blue", main = "ROC Curve")
+#auc(roc_curve)  # Calculate AUC
+
+
+data$target <- as.factor(data$target)  # Ensure target is a factor
+conf_matrix <- confusionMatrix(as.factor(pred_class), data$target)
+print(conf_matrix$overall['Accuracy'])
+
+eval <- evalmod(scores = pred_probs, labels = as.numeric(data$target))
+autoplot(eval)
+```
+
+# Feature Importances
+
+```{r}
+# LDA
+print(lda_importance_df)
+print(lda_importance_df_f)
+
+# Logistic Regression
+print(lr_importance_df)
+summary(lr_model)
+
+# Random Forest
+importance(rf_model)
+varImpPlot(rf_model)
+
+# Gradient Boosted Model
+summary(gbm_model)
+```
+

@@ -1,0 +1,426 @@
+---
+title: "SAN projekt"
+author: "Emina Ganibegovic"
+date: "2024-11-25"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width = 8.27, fig.height = 5.84, dpi = 300, echo = FALSE)
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(car)
+
+# Plot data folder
+output_folder <- "~/University/Ing./SAN/Semestral Project/Preprocessing/Plots"
+data_folder <- "~/University/Ing./SAN/Semestral Project/Preprocessing/data"
+clean_folder <- "~/University/Ing./SAN/Semestral Project/Preprocessing/Clean Data"
+```
+
+## Data Cleaning
+
+The heart data - we have to clean out the duplicate rows, and handle nans.
+Heart 2020 - is cleaned data, but we have to change the values from syntax to binary values.
+Heart 2022 - remove nans and duplicates, also change to binary values.
+Heart Statlog - remove duplicate rows, handle nans.
+
+```{r load}
+heart_data <- read.csv(file.path(data_folder, "heart.csv"), sep = ",")
+heart_2020 <- read.csv(file.path(data_folder, "heart_2020_cleaned.csv"), sep = ",")
+heart_stat <- read.csv(file.path(data_folder, "heart_statlog_cleveland_hungary_final.csv"), sep = ",")
+heart_2022 <- read.csv(file.path(data_folder, "heart_2022_with_nans.csv"), sep = ",")
+```
+
+```{r}
+bar_heights <- barplot(table(heart_2020$HeartDisease), 
+                       col = "skyblue", 
+                       main = "Distribution of Target Variable in Heart 2020",
+                       ylim = c(0, max(table(heart_2020$HeartDisease)) * 1.1))
+text(bar_heights, table(heart_2020$HeartDisease), 
+     labels = table(heart_2020$HeartDisease), 
+     pos = 3, cex = 1.2)
+```
+
+## Removing NAs and duplicates
+
+Heart.csv
+
+```{r heart.csv, echo=FALSE}
+# Remove duplicate rows
+heart_data <- distinct(heart_data)
+
+# Remove rows with NA values
+heart_data <- na.omit(heart_data)
+
+# Check the cleaned data
+print(head(heart_data))
+```
+
+Heart_statlog.csv
+
+```{r heart_statlog.csv}
+
+# Remove duplicate rows
+heart_stat <- distinct(heart_stat)
+
+# Remove rows with NA values
+heart_stat <- na.omit(heart_stat)
+
+# Check the cleaned data
+print(head(heart_stat))
+```
+
+Heart_2020.csv
+
+```{r heart_2020.csv}
+
+# Ensure all other syntax values are binary
+# (Assuming other columns are "Yes"/"No" and need similar conversion)
+heart_2020 <- heart_2020 %>%
+  mutate(across(everything(), ~ ifelse(. == "Yes", 1, ifelse(. == "No", 0, .))))
+
+# Map 'GenHealth' to numeric values
+heart_2020$GenHealth <- ifelse(heart_2020$GenHealth == "Excellent", 4,
+                        ifelse(heart_2020$GenHealth == "Very good", 3,
+                        ifelse(heart_2020$GenHealth == "Good", 2,
+                        ifelse(heart_2020$GenHealth == "Fair", 1, 0))))
+
+# Map 'Race' to numeric values
+heart_2020$Race <- ifelse(heart_2020$Race == "Black", 0,
+                   ifelse(heart_2020$Race == "White", 1,
+                   ifelse(heart_2020$Race == "American Indian", 2, NA))) # NA for other/unrecognized values
+
+# Map 'Sex' to numeric values (Male = 1, others = 0)
+heart_2020$Sex <- ifelse(heart_2020$Sex == "Male", 1, 0)
+
+# Remove duplicate rows
+heart_2020 <- distinct(heart_2020)
+
+# Remove rows with NA values
+heart_2020 <- na.omit(heart_2020)
+
+# Check the cleaned and processed data
+print(head(heart_2020))
+bar_heights <- barplot(table(heart_2020$HeartDisease), 
+                       col = "skyblue", 
+                       main = "Distribution of Target Variable in Heart 2020",
+                       ylim = c(0, max(table(heart_2020$HeartDisease)) * 1.1))
+text(bar_heights, table(heart_2020$HeartDisease), 
+     labels = table(heart_2020$HeartDisease), 
+     pos = 3, cex = 1.2)
+```
+
+Heart_2022.csv
+
+```{r heart_2022.csv}
+# Ensure all other syntax values are binary
+# (Assuming other columns are "Yes"/"No" and need similar conversion)
+heart_2022 <- heart_2022 %>%
+  mutate(across(everything(), ~ ifelse(. == "Yes", 1, ifelse(. == "No", 0, .))))
+
+# Map 'GeneralHealth' to numeric values
+heart_2022$GeneralHealth <- ifelse(heart_2022$GeneralHealth == "Excellent", 4,
+                        ifelse(heart_2022$GeneralHealth == "Very good", 3,
+                        ifelse(heart_2022$GeneralHealth == "Good", 2,
+                        ifelse(heart_2022$GeneralHealth == "Fair", 1, 0))))
+
+# Map 'Race' to numeric values
+heart_2022$RaceEthnicityCategory <- ifelse(heart_2022$RaceEthnicityCategory == "Black only, Non-Hispanic", 0,
+                   ifelse(heart_2022$RaceEthnicityCategory == "White only, Non-Hispanic", 1,
+                   ifelse(heart_2022$RaceEthnicityCategory == "American Indian", 2, NA))) # NA for other/unrecognized values
+
+# Map 'Smoking' to numeric values
+heart_2022$SmokerStatus <- ifelse(heart_2022$SmokerStatus == "Never smoked", 0,
+                   ifelse(heart_2022$SmokerStatus == "Former smoker", 1,
+                   ifelse(heart_2022$SmokerStatus == "Current smoker", 2, NA))) # NA for other/unrecognized values
+
+# Map 'ECigaretteUsage' to numeric values
+heart_2022$ECigaretteUsage <- ifelse(heart_2022$ECigaretteUsage == "Never used e-cigarettes in my entire life", 0,
+                   ifelse(heart_2022$ECigaretteUsage == "Use them some days", 1,
+                   ifelse(heart_2022$ECigaretteUsage == "Use them every day", 1,
+                   ifelse(heart_2022$ECigaretteUsage == "Not at all (right now)", 0, NA)))) # NA for other/unrecognized values
+
+# Map 'TetanusLast10Tdap' to numeric values
+heart_2022$TetanusLast10Tdap <- ifelse(heart_2022$TetanusLast10Tdap == "No, did not receive any tetanus shot in the past 10 years", 0,
+                   ifelse(heart_2022$TetanusLast10Tdap == "Yes, received tetanus shot but not sure what type", 1,
+                   ifelse(heart_2022$TetanusLast10Tdap == "Yes, received Tdap", 1,
+NA))) # NA for other/unrecognized values
+
+# Map 'LastCheckupTime' to numeric values
+heart_2022$LastCheckupTime <- ifelse(heart_2022$LastCheckupTime == "5 or more years ago", 0,
+                   ifelse(heart_2022$LastCheckupTime == "Within past 5 years (2 years but less than 5 years ago)", 1,
+                   ifelse(heart_2022$LastCheckupTime == "Within past 2 years (1 year but less than 2 years ago)", 2,
+                   ifelse(heart_2022$LastCheckupTime == "Within past year (anytime less than 12 months ago)", 3,
+NA)))) # NA for other/unrecognized values
+
+# Map 'Sex' to numeric values (Male = 1, others = 0)
+heart_2022$Sex <- ifelse(heart_2022$Sex == "Male", 1, 0)
+
+# Replace empty strings with NA in HadHeartAttack
+heart_2022$HadHeartAttack[heart_2022$HadHeartAttack == ""] <- NA
+heart_2022$HadStroke[heart_2022$HadStroke == ""] <- NA
+
+# Convert binary character variables to numeric (0/1)
+binary_columns <- c(
+  "PhysicalActivities", "HadAngina", "HadAsthma", "HadSkinCancer", 
+  "HadCOPD", "HadDepressiveDisorder", "HadKidneyDisease", 
+  "HadArthritis", "HadDiabetes", "DeafOrHardOfHearing", 
+  "BlindOrVisionDifficulty", "DifficultyConcentrating", 
+  "DifficultyWalking", "DifficultyDressingBathing", 
+  "DifficultyErrands", "ChestScan", "AlcoholDrinkers", 
+  "HIVTesting", "FluVaxLast12", "PneumoVaxEver", "HadHeartAttack", "HadStroke"
+)
+
+# Apply conversion
+heart_2022[binary_columns] <- lapply(heart_2022[binary_columns], function(x) as.numeric(as.character(x)))
+
+
+# Remove duplicate rows
+heart_2022 <- distinct(heart_2022)
+
+# Remove rows with NA values
+heart_2022 <- na.omit(heart_2022)
+
+# Check the cleaned and processed data
+print(head(heart_2022))
+```
+
+## Identify and Remove Influential Points (Cook's Distance) & Multicollinearity
+
+Influential points (outliers or high-leverage points) can disproportionately affect regression models or other statistical analyses, leading to biased results.
+Calculate Cook's distance for each observation in the dataset and remove those exceeding a certain threshold (e.g., 4/n, where n is the number of observations).
+
+Multicollinearity occurs when independent variables are highly correlated, making it difficult to isolate their effects on the dependent variable.
+It can destabilize regression coefficients and lead to overfitting.
+Variance Inflation Factor (VIF) to identify variables with high multicollinearity (VIF \> 5 or 10 indicates multicollinearity).
+Drop or combine such variables.
+
+```{r cook heart.csv}
+# Fit a preliminary linear model to calculate Cook's distance
+model_heart <- lm(target ~ ., data = heart_data)
+
+# Calculate Cook's distance
+cooks_dist <- cooks.distance(model_heart)
+
+# Define a threshold (e.g., 4/n)
+threshold <- 4 / nrow(heart_data)
+
+# Identify influential points
+influential <- which(cooks_dist > threshold)
+
+# Remove influential points
+heart_data <- heart_data[-influential, ]
+
+# Check the remaining data
+print(nrow(heart_data))
+
+# Calculate VIF
+vif_values <- vif(model_heart)
+
+# Print VIF values
+print(vif_values)
+
+# Save the processed data for further use
+write.csv(heart_data,file.path(clean_folder, "heart_data.csv"), row.names = FALSE)
+```
+
+```{r cook heart_stat.csv}
+# Fit a preliminary linear model to calculate Cook's distance
+model_stat <- lm(target ~ ., data = heart_stat)
+
+# Calculate Cook's distance
+cooks_dist <- cooks.distance(model_stat)
+
+# Define a threshold (e.g., 4/n)
+threshold <- 4 / nrow(heart_stat)
+
+# Identify influential points
+influential <- which(cooks_dist > threshold)
+
+# Remove influential points
+heart_stat <- heart_stat[-influential, ]
+
+# Check the remaining data
+print(nrow(heart_stat))
+
+# Calculate VIF
+vif_values <- vif(model_stat)
+
+# Print VIF values
+print(vif_values)
+
+# Save the processed data for further use
+write.csv(heart_stat,file.path(clean_folder, "heart_stat.csv"), row.names = FALSE)
+```
+
+```{r cook heart_2020.csv}
+# Fit a preliminary linear model to calculate Cook's distance
+model_2020 <- lm(HeartDisease ~ ., data = heart_2020)
+
+# Calculate Cook's distance
+cooks_dist <- cooks.distance(model_2020)
+
+# Define a threshold (e.g., 4/n)
+threshold <- 4 / nrow(heart_2020)
+
+# Identify influential points
+influential <- which(cooks_dist > threshold)
+
+# Remove influential points
+heart_2020 <- heart_2020[-influential, ]
+
+# Check the remaining data
+print(nrow(heart_2020))
+
+# Calculate VIF
+vif_values <- vif(model_2020)
+
+# Print VIF values
+print(vif_values)
+
+bar_heights <- barplot(table(heart_2020$HeartDisease), 
+                       col = "skyblue", 
+                       main = "Distribution of Target Variable in Heart 2020",
+                       ylim = c(0, max(table(heart_2020$HeartDisease)) * 1.1))
+text(bar_heights, table(heart_2020$HeartDisease), 
+     labels = table(heart_2020$HeartDisease), 
+     pos = 3, cex = 1.2)
+# Save the processed data for further use
+#write.csv(heart_2020,file.path(clean_folder, "heart_2020.csv"), row.names = FALSE)
+```
+
+```{r}
+# Fit a preliminary linear model to calculate Cook's distance
+model_2022 <- lm(HadHeartAttack~ ., data = heart_2022)
+#unique(heart_2022$HadHeartAttack)
+# Calculate Cook's distance
+cooks_dist <- cooks.distance(model_2022)
+
+# Define a threshold (e.g., 4/n)
+threshold <- 4 / nrow(heart_2022)
+
+# Identify influential points
+influential <- which(cooks_dist > threshold)
+
+# Remove influential points
+heart_2022 <- heart_2022[-influential, ]
+
+# Check the remaining data
+print(nrow(heart_2022))
+
+# Calculate VIF
+vif_values <- vif(model_2022)
+
+# Print VIF values
+print(vif_values)
+```
+
+General Rule for VIF:
+
+```         
+A GVIF^(1/(2*Df)) greater than 5 (some use 10) indicates potential multicollinearity.
+```
+
+Problematic Variables in Your Data:
+
+```         
+HeightInMeters (4.50)
+WeightInKilograms (8.66)
+BMI (7.63)
+HighRiskLastYear (1.63) – although borderline.
+CovidPos (1.38) – although borderline.
+```
+
+From HeightInMeters, WeightInKilograms, and BMI, it is clear that these variables are closely related (e.g., BMI is derived from height and weight).
+Keeping all three may lead to overfitting and redundant information.
+
+```{r heart_2022 rmv predictors}
+heart_2022 <- heart_2022 %>%
+  select(-HeightInMeters, -WeightInKilograms)
+
+cor(heart_2022[, sapply(heart_2022, is.numeric)])  # Correlation matrix for numeric variables
+
+# Save the processed data for further use
+write.csv(heart_2022,file.path(clean_folder, "heart_2022.csv"), row.names = FALSE)
+```
+
+General Patterns:
+
+```         
+Most correlations are weak (< |0.3|), which suggests that many variables are independent and not strongly linearly related.
+Exceptions with moderate correlations deserve attention.
+```
+
+Potentially Relevant Correlations:
+
+```         
+GeneralHealth and PhysicalHealthDays: -0.452 (moderate negative correlation).
+BMI and GeneralHealth: -0.271 (moderate negative correlation).
+MentalHealthDays and PhysicalHealthDays: 0.281 (positive correlation).
+```
+
+Minimal Correlation with HadHeartAttack:
+
+```         
+HadHeartAttack shows very weak correlations with all other variables, suggesting no single variable is strongly predictive on its own.
+```
+
+No Perfect Collinearity:
+
+```         
+No correlations are close to 1 or -1, which means there are no direct redundancies between variables.
+```
+
+```{r heart_2022.csv vif check}
+model <- lm(HadHeartAttack ~ ., data = heart_2022)
+vif(model)  # Check multicollinearity
+```
+
+## Possible issues in the future
+
+Variables like GeneralHealth, PhysicalHealthDays, and MentalHealthDays show moderate correlations.
+If they cause instability in your model, consider:
+
+1.  Combining Variables: Create composite variables (e.g., sum or weighted average of PhysicalHealthDays and MentalHealthDays).
+
+heart_2022$CombinedHealthDays <- heart_2022$PhysicalHealthDays + heart_2022\$MentalHealthDays
+
+Selecting One Variable: Choose the variable that is most predictive of the outcome (HadHeartAttack).
+
+2.  Feature Engineering
+
+Use the weak correlations to justify adding interaction terms or non-linear transformations:
+
+```         
+Interaction terms for weakly related variables:
+```
+
+heart_2022$Interaction <- heart_2022$BMI \* heart_2022\$GeneralHealth
+
+Non-linear transformations:
+
+heart_2022$BMI_squared <- heart_2022$BMI\^2
+
+3.  Alternative Models
+
+Since HadHeartAttack has weak correlations with most variables, consider:
+
+```         
+Logistic Regression (if HadHeartAttack is binary):
+```
+
+model \<- glm(HadHeartAttack \~ ., data = heart_2022, family = binomial) summary(model)
+
+Tree-Based Models (to capture non-linear relationships):
+
+library(randomForest) model \<- randomForest(HadHeartAttack \~ ., data = heart_2022) print(model)
+
+While no variables show perfect multicollinearity, moderate correlations between GeneralHealth, PhysicalHealthDays, and MentalHealthDays warrant attention.
+Weak correlations with HadHeartAttack suggest that more complex modeling techniques (e.g., interactions or tree-based models) might be necessary.
+
+## Cleaned data saved in Clean Data folder \<3

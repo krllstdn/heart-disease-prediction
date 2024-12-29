@@ -1,0 +1,458 @@
+---
+title: "heart_2020"
+author: "Kyrylo Stadniuk"
+date: "2024-12-27"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(glmnet)
+library(pander)
+library(psych)
+library(corrplot)
+library(MASS)  # For LDA
+library(ggplot2)
+library(plotly)
+library(factoextra)
+library(cluster)
+library(dplyr)
+library(class)      # For KNN
+library(caret)      # For cross-validation
+library(dbscan)
+library(pROC)
+library(precrec)# precision-recall curve
+library(e1071) # SVM
+library(mlr)
+library(randomForest)
+library(gbm)
+
+```
+
+```{r load}
+data_folder = "~/University/Ing./SAN/Semestral Project/Data Analysis/Clean Data"
+dirty_data_folder = "~/University/Ing./SAN/Semestral Project/Data Analysis/data"
+
+heart_2020 <- read.csv(file.path(data_folder, "heart_2020.csv"), sep = ",")
+```
+
+```{r}
+head(heart_2020)
+barplot(table(heart_2020$HeartDisease), col = "skyblue", main = "Distribution of Target Variable")
+```
+Well, the aren't any instances of positive class in the cleaned dataset. After some investigation I found out that the dataset was imbalanced from the beginning: there are far more instances of negative class than of positive class. This situation is quite common. And the mistake we made was that we did an outlier detection on the imbalanced dataset. All instances of positive class were marked as outliers and removed.
+
+# Data Cleaning
+Now, let us clean the initial data set once again, but skip the outlier detection step.
+
+```{r}
+heart_2020 <- read.csv(file.path(dirty_data_folder, "heart_2020_cleaned.csv"), sep = ",")
+head(heart_2020)
+bar_heights <- barplot(table(heart_2020$HeartDisease), 
+                       col = "skyblue", 
+                       main = "Distribution of Target Variable in Heart 2020 before cleaning",
+                       ylim = c(0, max(table(heart_2020$HeartDisease)) * 1.1))
+text(bar_heights, table(heart_2020$HeartDisease), 
+     labels = table(heart_2020$HeartDisease), 
+     pos = 3, cex = 1.2)
+
+heart_2020 <- heart_2020 %>%
+  mutate(across(everything(), ~ ifelse(. == "Yes", 1, ifelse(. == "No", 0, .))))
+
+heart_2020$GenHealth <- ifelse(heart_2020$GenHealth == "Excellent", 4,
+                        ifelse(heart_2020$GenHealth == "Very good", 3,
+                        ifelse(heart_2020$GenHealth == "Good", 2,
+                        ifelse(heart_2020$GenHealth == "Fair", 1, 0))))
+heart_2020$Race <- ifelse(heart_2020$Race == "Black", 0,
+                   ifelse(heart_2020$Race == "White", 1,
+                   ifelse(heart_2020$Race == "American Indian", 2, NA))) # NA for other/unrecognized values
+heart_2020$Sex <- ifelse(heart_2020$Sex == "Male", 1, 0)
+
+heart_2020$AgeCategory <- as.numeric(factor(heart_2020$AgeCategory,
+                                            levels = c('18-24', '25-29', '30-34', '35-39', 
+                                                       '40-44', '45-49', '50-54', '55-59', 
+                                                       '60-64', '65-69', '70-74', '75-79', 
+                                                       '80 or older')))
+
+
+heart_2020 <- distinct(heart_2020)
+heart_2020 <- apply(heart_2020, 2, as.numeric)
+heart_2020 <- na.omit(heart_2020)
+
+bar_heights <- barplot(table(heart_2020[, "HeartDisease"]), 
+                       col = "skyblue", 
+                       main = "Distribution of Target Variable in Heart 2020 after cleaning and no outlier detection",
+                       ylim = c(0, max(table(heart_2020[, "HeartDisease"])) * 1.1))
+text(bar_heights, table(heart_2020[, "HeartDisease"]), 
+     labels = table(heart_2020[, "HeartDisease"]), 
+     pos = 3, cex = 1.2)
+```
+As we can see, now we have some instances of positive class with which we can work now.
+
+# Exploratory Data Analysis
+
+```{r}
+table(heart_2020[, "HeartDisease"])  # Check unique values
+```
+
+
+```{r}
+X <- as.matrix(heart_2020[, !colnames(heart_2020) %in% "HeartDisease"])
+y <- as.numeric(heart_2020[, "HeartDisease"])
+
+cv_lasso <- cv.glmnet(X, y, alpha = 1)
+
+coef_lasso <- coef(cv_lasso, s = "lambda.min")
+print(coef_lasso)
+```
+`PhysicalActivity` for some reason is not important. Let us remove it and continue with our analysis.
+
+#### Descriptive Statistics
+```{r}
+features2remove <- c("PhysicalActivity")
+heart_impr <- heart_2020[, !colnames(heart_2020) %in% features2remove]
+X <- X[, !colnames(X) %in% features2remove]
+
+stats <- psych::describe(heart_impr)
+stats <- stats[, !colnames(stats) %in% c("n", "vars")]
+
+selected_features <- c("SleepTime", "BMI", "PhysicalHealth", "MentalHealth") # choose only numerical features
+filtered_stats <- stats[rownames(stats) %in% selected_features, ]
+
+print(pander(filtered_stats, split.tables = Inf))
+```
+The table provides descriptive statistics for four variables: BMI, PhysicalHealth, MentalHealth, and SleepTime. The BMI has a mean of 28.46 with a moderately high standard deviation (6.437) and a wide range (12.02–94.85), indicating possible outliers and a right-skewed distribution (skew = 1.241). Both PhysicalHealth and MentalHealth show a highly skewed distribution (skew > 2) with medians of 0, suggesting that most participants reported no poor health days, but a few reported high values (up to 30 days), making these variables right-skewed and leptokurtic. SleepTime averages around 7.1 hours with low variability (SD = 1.453), but extreme values (1–24 hours) contribute to high kurtosis (7.42), suggesting potential outliers or reporting errors. Overall, the data highlights trends of asymmetry and outliers across variables. Which makes sense, as we skipped the outlier detection step.
+
+
+#### Correlation Table
+```{r}
+options(width = 100)
+corr <- as.matrix(cor(X))
+print(corr)
+
+cat("Highest correlation (except for 1):", max(corr[corr != 1])) # highest `r` except for 1
+corrplot(corr)
+```
+We can observe moderate correlations between `PhysicalHealth` and `GenHealth`, `GenHealth` and `DiffWalking`, but as was evaluated previously during the data cleaning step with VIF, there is no multicollinearity so this is not a concern.
+
+
+### Visualization
+
+```{r}
+scaled_data <- scale(X)
+```
+
+
+#### LDA
+
+```{r}
+data <- as.data.frame(heart_2020)
+data$HeartDisease <- as.factor(data$HeartDisease)
+
+lda_model <- lda(HeartDisease ~ ., data = data)
+
+lda_values <- predict(lda_model)
+
+lda_df <- data.frame(lda_values$x, target = data$HeartDisease)
+
+ggplot(lda_df, aes(x = LD1, y = 0, color = target)) +
+  geom_jitter(height = 0.1, width = 0.2, size = 2, alpha = 0.3) +
+  labs(title = "LDA Clusters") +
+  theme_minimal()
+
+ggplot(lda_df, aes(x = LD1, color = target)) +
+  geom_density() +
+  labs(title = "LDA Density Plot") +
+  theme_minimal()
+```
+Well...
+
+
+
+
+#### PCA
+
+```{r}
+scaled_data <- scale(X)
+pca <- prcomp(scaled_data)
+
+pca_df <- data.frame(PC1 = pca$x[, 1], 
+                     PC2 = pca$x[, 2], 
+                     Target = y)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = as.factor(Target))) +
+  geom_point(size = 2) +
+  labs(title = "PCA Visualization", x = "PC1", y = "PC2") +
+  theme_minimal()
+
+plot_ly(data = pca_df, 
+        x = ~PC1, 
+        y = ~PC2, 
+        z = ~pca$x[, 3],  # PC3 for 3D plot
+        color = ~as.factor(Target),
+        colors = c('red', 'blue')) %>%
+  add_markers(marker = list(size = 3)) %>%
+  layout(title = "3D PCA Visualization",
+         scene = list(xaxis = list(title = "PC1"),
+                      yaxis = list(title = "PC2"),
+                      zaxis = list(title = "PC3")))
+```
+
+
+
+#### K-Means
+```{r}
+#fviz_nbclust(scaled_data, kmeans, method = "wss")
+
+kmeans_model <- kmeans(scaled_data, centers = 2)
+clusters <- kmeans_model$cluster
+
+pca <- prcomp(scaled_data)  # Perform PCA for dimensionality reduction
+
+plot_ly(x = pca$x[, 1], 
+        y = pca$x[, 2], 
+        z = pca$x[, 3], 
+        color = ~factor(clusters),  # Color by cluster
+        colors = c('red', 'blue', 'green')) %>%
+  add_markers(marker = list(size = 3)) %>%  # Set point size
+  layout(title = "3D Cluster K-means Visualization",
+         scene = list(xaxis = list(title = "PC1"),
+                      yaxis = list(title = "PC2"),
+                      zaxis = list(title = "PC3")))
+```
+
+
+All clustering methods basically tell us the same thing: these two classes are not easily separable.
+
+
+# Statistical Modelling
+We have an imbalanced dataset, so if we don't handle that, it will have negative effects on performance. Let us look at how the model will perform if we train it as usual.
+
+## LDA
+We already trained it so let us look at the performance:
+```{r}
+lda_pred <- predict(lda_model)  # Predict class and probabilities
+pred_class <- lda_pred$class   # Predicted classes
+conf_matrix <- confusionMatrix(pred_class, data$HeartDisease)
+print(conf_matrix)
+
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1-Score:", f1, "\n")
+```
+
+## logistic Regression
+```{r collapse=FALSE}
+data <- data.frame(scaled_data, target = y)  # Combine scaled data with target
+
+lr_model <- glm(target ~ ., data = data, family = binomial)  # Logistic regression
+summary(model)
+
+# Evaluation
+pred_probs <- predict(lr_model, type = "response")  # Get probabilities
+pred_class <- ifelse(pred_probs > 0.5, 1, 0)     # Threshold at 0.5
+
+print(confusionMatrix(as.factor(pred_class), as.factor(data$target)))
+
+eval <- evalmod(scores = pred_probs, labels = as.numeric(data$target))
+
+# Plot Precision-Recall Curve
+autoplot(eval)
+```
+The accuracy of 0.9 is not bad at all, but if we take a look at the ROC and Precision-recall curves we can see that the model is suboptimal to say the least. 
+Accuracy is unusable in imbalanced dataset. Basically, the model can always predict negative class and be correct in 90% of cases (as there is 90:10 distribution of classes)
+
+```{r collapse=FALSE}
+data <- data.frame(scaled_data, target = y)  # Combine scaled data with target
+
+#model <- glm(target ~ ., data = data, family = binomial, weights = ifelse(target == 1, 10, 1))  # Logistic regression
+#summary(model)
+
+weights <- ifelse(data$target == 1, 2, 1)
+
+model <- glm(target ~ ., data = data, family = binomial, weights = weights)
+summary(model)
+# Evaluation
+pred_probs <- predict(model, type = "response")  # Get probabilities
+pred_class <- ifelse(pred_probs > 0.5, 1, 0)     # Threshold at 0.5
+
+print(confusionMatrix(as.factor(pred_class), as.factor(data$target)))
+
+eval <- evalmod(scores = pred_probs, labels = as.numeric(data$target))
+
+# Plot Precision-Recall Curve
+autoplot(eval)
+```
+Even weighted logistic regression is not optimal. It is possible that some non-linear relatioships take place. So let us look at Random Forest, which captures non-linear relationships pretty well.
+
+```{r}
+coef_values <- coef(lr_model)
+
+importance <- abs(coef_values[-1])
+lr_importance_df <- data.frame(Feature = names(importance), Importance = importance)
+
+# Sort by importance
+lr_importance_df <- lr_importance_df[order(-lr_importance_df$Importance), ]
+print(lr_importance_df)
+summary(lr_model)
+```
+
+## Random Forest
+Random Forests are able to handle imbalanced datasets pretty well, so let us train it without any class weights (they are usually used to counter the class imbalance) and then we will take a look at weighted RF.
+```{r}
+set.seed(123)  # For reproducibility
+data$target <- as.factor(data$target)
+rf_model <- randomForest(target ~ ., data = data, ntree = 50, mtry = sqrt(ncol(data) - 1), importance = TRUE)
+
+print(rf_model)
+```
+
+
+```{r}
+#pred_class <- predict(rf_model, data)  # Predict class labels
+
+pred_probs <- predict(rf_model, data, type = "prob")[, 2]
+pred_class <- ifelse(pred_probs > 0.5, 1, 0)  # Apply 0.5 threshold
+pred_class <- as.factor(pred_class)
+
+conf_matrix <- confusionMatrix(pred_class, data$target)
+print(conf_matrix)
+
+eval <- evalmod(scores = pred_probs, labels = as.numeric(data$target))
+autoplot(eval)
+
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1_score <- conf_matrix$byClass["F1"]
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1-Score:", f1_score, "\n")
+```
+Well, the results are not bad at all. For our purposes Recall is the most important metric, as we try to minimize the type II error (false negatives) and we are ok with some false positives. (False prediction is better than no prediction and further illness)
+As we can see Recall is very high.
+
+
+#### Weighted RF
+```{r}
+# weights for each class to combat the class imbalance
+class_weights <- c("0" = 1, "1" = 2)
+
+rf_model <- randomForest(target ~ ., 
+                         data = data, 
+                         ntree = 50,              
+                         mtry = sqrt(ncol(data)-1),
+                         importance = TRUE,       
+                         classwt = class_weights) 
+
+pred_probs <- predict(rf_model, data, type = "prob")[, 2]
+pred_class <- ifelse(pred_probs > 0.57, 1, 0)
+pred_class <- as.factor(pred_class)
+
+conf_matrix <- confusionMatrix(pred_class, data$target)
+print(conf_matrix)
+
+eval <- evalmod(scores = pred_probs, labels = as.numeric(data$target))
+autoplot(eval)
+
+f1_score <- conf_matrix$byClass["F1"]
+cat("F1-Score:", f1_score, "\n")
+```
+```{r}
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1_score <- conf_matrix$byClass["F1"]
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1-Score:", f1_score, "\n")
+
+# Find best threshold
+roc_curve <- roc(data$target, pred_probs)
+best_thresh <- coords(roc_curve, "best", ret = "threshold", best.method = "youden")
+cat("Best Threshold:", best_thresh$threshold)
+```
+```{r}
+set.seed(123)  # For reproducibility
+
+# Split data into 70% training and 30% test sets
+library(caret)
+train_index <- createDataPartition(data$target, p = 0.7, list = FALSE)
+
+train_data <- data[train_index, ]
+test_data <- data[-train_index, ]
+
+rf_model <- randomForest(target ~ ., data = data, ntree = 50, mtry = sqrt(ncol(data) - 1), importance = TRUE)
+
+# Probabilities and labels for test data
+pred_probs_test <- predict(rf_model, test_data, type = "prob")[, 2]
+pred_class_test <- predict(rf_model, test_data)
+
+conf_matrix_test <- confusionMatrix(pred_class_test, test_data$target)
+print(conf_matrix_test)
+conf_matrix_train <- confusionMatrix(predict(rf_model, train_data), train_data$target)
+train_precision <- conf_matrix_train$byClass["Precision"]
+train_recall <- conf_matrix_train$byClass["Recall"]
+train_f1 <- conf_matrix_train$byClass["F1"]
+test_precision <- conf_matrix_test$byClass["Precision"]
+test_recall <- conf_matrix_test$byClass["Recall"]
+test_f1 <- conf_matrix_test$byClass["F1"]
+
+cat("Train Precision:", train_precision, "\n")
+cat("Train Recall:", train_recall, "\n")
+cat("Train F1:", train_f1, "\n")
+
+cat("Test Precision:", test_precision, "\n")
+cat("Test Recall:", test_recall, "\n")
+cat("Test F1:", test_f1, "\n")
+
+```
+Even on test set the model performs just as well.
+
+
+# GBM
+```{r}
+set.seed(123)  # For reproducibility
+
+data$target = as.numeric(data$target) - 1  # R....
+
+# Train GBM Model
+gbm_model <- gbm(target ~ ., 
+                 data = data, 
+                 distribution = "bernoulli",  # Binary classification
+                 n.trees = 100,             # Number of trees
+                 interaction.depth = 3,      # Depth of trees
+                 shrinkage = 0.01,           # Learning rate
+                 n.minobsinnode = 10,        # Minimum observations per node
+                 cv.folds = 5,               # Cross-validation
+                 verbose = FALSE)
+
+# Print model summary
+summary(gbm_model)
+```
+
+
+# Feature Importances
+
+```{r}
+# LDA
+print(lda_importance_df)
+print(lda_importance_df_f)
+
+# Logistic Regression
+print(lr_importance_df)
+summary(lr_model)
+
+# Random Forest
+importance(rf_model)
+varImpPlot(rf_model)
+
+# Gradient Boosted Model
+summary(gbm_model)
+```

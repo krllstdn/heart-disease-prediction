@@ -1,0 +1,461 @@
+---
+title: "framingham"
+author: "Kyrylo Stadniuk"
+date: "2024-12-29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+[Dataset description](https://biolincc.nhlbi.nih.gov/media/teachingstudies/FHS_Teaching_Longitudinal_Data_Documentation_2021a.pdf?link_time=2024-12-29_04:24:30.211824)
+
+sex : the gender of the observations. The variable is a binary named “male” in the dataset.
+age : Age at the time of medical examination in years.
+education : A categorical variable of the participants education, with the levels: Some high school (1), high school/GED (2), some college/vocational school (3), college (4)
+currentSmoker: Current cigarette smoking at the time of examinations
+cigsPerDay: Number of cigarettes smoked each day
+BPmeds: Use of Anti-hypertensive medication at exam
+prevalentStroke: Prevalent Stroke (0 = free of disease)
+prevalentHyp: Prevalent Hypertensive. Subject was defined as hypertensive if treated
+diabetes: Diabetic according to criteria of first exam treated
+totChol: Total cholesterol (mg/dL)
+sysBP: Systolic Blood Pressure (mmHg)
+diaBP: Diastolic blood pressure (mmHg)
+BMI: Body Mass Index, weight (kg)/height (m)^2
+heartRate: Heart rate (beats/minute)
+glucose: Blood glucose level (mg/dL)
+And finally the target variable : + TenYearCHD : The 10 year risk of coronary heart disease(CHD)
+
+
+
+```{r}
+library(glmnet)
+library(pander)
+library(psych)
+library(corrplot)
+library(MASS)  # For LDA
+library(ggplot2)
+library(plotly)
+library(factoextra)
+library(cluster)
+library(dplyr)
+library(class)      # For KNN
+library(caret)      # For cross-validation
+library(dbscan)
+library(pROC)
+library(precrec)# precision-recall curve
+library(e1071) # SVM
+library(mlr)
+library(randomForest)
+library(gbm)
+library(car)
+library(mice)
+```
+
+# Data Cleaning
+```{r}
+dirty_data_folder = "~/University/Ing./SAN/Semestral Project/Data Analysis/data"
+framingham <- read.csv(file.path(dirty_data_folder, "framingham.csv"), sep = ",")
+head(framingham)
+```
+Thankfully the dataset is 
+
+```{r}
+dim(framingham)
+sum(is.na(framingham))
+data_non_imputed <- na.omit(framingham)
+#dim(data)
+
+na_counts <- colSums(is.na(framingham))  # Count NAs in each column
+cat("NA count: ", na_counts, "\n")
+
+# imputation
+imputed_data <- mice(framingham, m = 5, method = 'pmm', seed = 123)
+data_imputed <- complete(imputed_data)
+data <- data_imputed # for comparison of descriptive statistics
+print(nrow(data_imputed))
+
+# remove outliers
+model_stat <- lm(TenYearCHD ~ ., data = data_non_imputed)
+cooks_dist <- cooks.distance(model_stat)
+threshold <- 4 / nrow(data_non_imputed)
+influential <- which(cooks_dist > threshold)
+data_non_imputed <- data_non_imputed[-influential, ]
+data_non_imputed <- na.omit(data_non_imputed)
+cat("Num. of instances with no imputation and with no outliers: ", nrow(data_non_imputed), "\n")
+
+data <- as.data.frame(data)
+data <- na.omit(data)
+cat("Num. of instances with imputation and with outliers: ", nrow(data))
+```
+glucose has the most of missing values. We analyzed it with logistic regression and Random forest and it seems important, so we will not drop it. We will try to impute it with MICE, as the traditional imputation with feature mean is likely to introduce too much bias, considering that this feature is skewed and should have some outliers.
+
+The 
+
+```{r}
+bar_heights <- barplot(table(framingham[, "TenYearCHD"]), 
+                       col = "skyblue", 
+                       main = "Distribution of Target Variable before cleaning",
+                       ylim = c(0, max(table(framingham[, "TenYearCHD"])) * 1.1))
+text(bar_heights, table(framingham[, "TenYearCHD"]), 
+     labels = table(framingham[, "TenYearCHD"]), 
+     pos = 3, cex = 1.2)
+
+bar_heights <- barplot(table(data_non_imputed[, "TenYearCHD"]), 
+                       col = "skyblue", 
+                       main = "Distribution of Target Variable after cleaning (non-imputed)",
+                       ylim = c(0, max(table(data_non_imputed[, "TenYearCHD"])) * 1.1))
+text(bar_heights, table(data_non_imputed[, "TenYearCHD"]), 
+     labels = table(data_non_imputed[, "TenYearCHD"]), 
+     pos = 3, cex = 1.2)
+
+bar_heights <- barplot(table(data[, "TenYearCHD"]), 
+                       col = "skyblue", 
+                       main = "Distribution of Target Variable in imputed data",
+                       ylim = c(0, max(table(data[, "TenYearCHD"])) * 1.1))
+text(bar_heights, table(data[, "TenYearCHD"]), 
+     labels = table(data[, "TenYearCHD"]), 
+     pos = 3, cex = 1.2)
+```
+Hmmm... Cleaning removed 400 instances from both classes and it is imbalanced as it is. The loss of two thirds of instances of positive class is not acceptable. Moreover, the dataset has lost 1000 instances total after NA and outlier removal. The dataset is not big so this is quite substantial. We might need to remove columns with a lot of NAs or impute them rather than remove instances.
+After further investigation we found out that it was caused by outlier removal. Taking into account the imbalanced nature of this dataset and the domain (outliers represent high-risk patients rather than data errors), we think that the outlier removal step might be omitted. 
+
+
+
+# Data Analysis
+
+```{r}
+X <- as.matrix(data[, !colnames(data) %in% "TenYearCHD"])
+y <- as.numeric(data[, "TenYearCHD"])
+
+cv_lasso <- cv.glmnet(X, y, alpha = 1)
+
+coef_lasso <- coef(cv_lasso, s = "lambda.min")
+print(coef_lasso)
+
+data$TenYearCHD <- as.factor(data$TenYearCHD)
+rf <- randomForest(TenYearCHD ~ ., data = data, ntree = 50, mtry = sqrt(ncol(data) - 1), importance = TRUE)
+print(importance(rf))
+varImpPlot(rf)
+```
+Interesting, Shrinkage discarded variables that were deemed important by Random Forest.(shrinkage shows only linear relationship) 
+
+It seems that the dataset was preprocessed enough and we can move to further data analysis.
+
+
+## Multicollinearity
+```{r}
+options(width = 100)
+corr <- as.matrix(cor(X))
+print(corr)
+
+cat("Highest correlation (except for 1):", max(corr[corr != 1])) # highest `r` except for 1
+corrplot(corr)
+```
+Ok, highest correlation is 0.78 between systolic and diastolic blood pressure. There are other moderate correlations:
+- `currentSmoker` and `cigsPerDay`
+- `sysBP` and `diaBP`
+- `glucose` and `diabetes`
+- `prevalentHyp` and `sysBP` 
+- `prevalentHyp` and `diaBP`
+Makes sense, but let us see if they are problematic by calculating VIF.
+
+```{r}
+model_stat <- lm(TenYearCHD ~ ., data = data)
+
+# calculate VIF
+vif_values <- vif(model_stat)
+print(vif_values)
+```
+Following features cause a concern:
+- `sysBP (3.70)` and `diaBP (3.04)` have moderate multicollinearity. We will create a new variable out of them `sysBP - diaBP` called `pulsePressure`.
+- `currentSmoker (2.64)` and `cigsPerDay (2.81)` show low to moderate multicollinearity. Makes sense, as they are related. We will keep just `cigsPerDay`, as it contains the relevant information.
+
+```{r}
+data$pulsePressure <- data$sysBP - data$diaBP
+data <- subset(data, select = -c(currentSmoker, sysBP, diaBP))
+```
+
+```{r}
+model_stat <- lm(TenYearCHD ~ ., data = data)
+
+vif_values <- vif(model_stat)
+print(vif_values)
+```
+There is no VIF value larger than 1.66, so we can say that we handled the multicollinearity successfully.
+
+## Descriptive Statistics
+
+```{r}
+stats <- psych::describe(data_non_imputed)
+stats <- stats[, !colnames(stats) %in% c("n", "vars")]
+
+selected_features <- c("Age", "cigsPerDay", "totChol", "BMI", "heartRate", "glucose", "pulsePressure") # choose only numerical features
+filtered_stats <- stats[rownames(stats) %in% selected_features, ]
+
+print(pander(filtered_stats, split.tables = Inf))
+
+stats <- psych::describe(data)
+stats <- stats[, !colnames(stats) %in% c("n", "vars")]
+
+selected_features <- c("Age", "cigsPerDay", "totChol", "BMI", "heartRate", "glucose", "pulsePressure") # choose only numerical features
+filtered_stats <- stats[rownames(stats) %in% selected_features, ]
+
+print(pander(filtered_stats, split.tables = Inf))
+
+```
+This table provides descriptive statistics for six variables related to health and lifestyle factors in the dataset. CigsPerDay shows a mean of 8.9 cigarettes with a high standard deviation (11.68), indicating considerable variability, and a median of 0, suggesting many non-smokers. TotChol (total cholesterol) has an average of 235.4 mg/dL with moderate variability (42.42) and a slight positive skew (0.48), indicating most values are clustered around the mean. BMI has a mean of 25.62 and a relatively low standard deviation (3.82), suggesting less dispersion, with a slight positive skew (0.74). HeartRate averages 75.5 bpm, showing low variability (11.76) and mild skewness (0.66). Glucose has a mean of 79.95 mg/dL but displays a highly skewed distribution (5.49) and extreme values, which makes sense as some people have diabetes. PulsePressure averages 48.2 mmHg with moderate variability (13.09) and a positive skew (1.16), indicating some higher values. 
+
+As we can see, the distribution of the imputed data did not change much, so we can consider imputation a success. (Although it is a good idea to compare models) 
+
+## Clustering
+
+```{r}
+data$TenYearCHD <- as.factor(data$TenYearCHD)
+
+lda_model <- lda(TenYearCHD ~ ., data = data)
+
+lda_values <- predict(lda_model)
+
+lda_df <- data.frame(lda_values$x, target = data$TenYearCHD)
+
+ggplot(lda_df, aes(x = LD1, y = 0, color = target)) +
+  geom_jitter(height = 0.1, width = 0.2, size = 2, alpha = 0.8) +
+  labs(title = "LDA Clusters") +
+  theme_minimal()
+
+ggplot(lda_df, aes(x = LD1, color = target)) +
+  geom_density() +
+  labs(title = "LDA Density Plot") +
+  theme_minimal()
+```
+
+## PCA
+
+```{r}
+scaled_data <- scale(X)
+pca <- prcomp(scaled_data)
+
+pca_df <- data.frame(PC1 = pca$x[, 1], 
+                     PC2 = pca$x[, 2], 
+                     Target = y)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = as.factor(Target))) +
+  geom_point(size = 2) +
+  labs(title = "PCA Visualization", x = "PC1", y = "PC2") +
+  theme_minimal()
+
+plot_ly(data = pca_df, 
+        x = ~PC1, 
+        y = ~PC2, 
+        z = ~pca$x[, 3],  # PC3 for 3D plot
+        color = ~as.factor(Target),
+        colors = c('red', 'blue')) %>%
+  add_markers(marker = list(size = 3)) %>%
+  layout(title = "3D PCA Visualization",
+         scene = list(xaxis = list(title = "PC1"),
+                      yaxis = list(title = "PC2"),
+                      zaxis = list(title = "PC3")))
+```
+
+
+
+```{r}
+kmeans_model <- kmeans(scaled_data, centers = 2)
+clusters <- kmeans_model$cluster
+
+pca <- prcomp(scaled_data)  # Perform PCA for dimensionality reduction
+
+plot_ly(x = pca$x[, 1], 
+        y = pca$x[, 2], 
+        z = pca$x[, 3], 
+        color = ~factor(clusters),  # Color by cluster
+        colors = c('red', 'blue', 'green')) %>%
+  add_markers(marker = list(size = 3)) %>%  # Set point size
+  layout(title = "3D Cluster K-means Visualization",
+         scene = list(xaxis = list(title = "PC1"),
+                      yaxis = list(title = "PC2"),
+                      zaxis = list(title = "PC3")))
+```
+
+All clustering methods basically tell us the same thing: these two classes are not easily separable.
+
+# Statistical Modelling
+
+## LDA
+We already trained it so let us look at the performance:
+```{r}
+lda_pred <- predict(lda_model)  # Predict class and probabilities
+pred_class <- lda_pred$class   # Predicted classes
+conf_matrix <- confusionMatrix(pred_class, data$TenYearCHD)
+print(conf_matrix)
+
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1-Score:", f1, "\n")
+```
+
+### feature importance...
+```{r}
+importance <- abs(lda_model$scaling)
+lda_importance_df <- data.frame(Feature = rownames(importance), Importance = importance[, 1])
+lda_importance_df <- lda_importance_df[order(-lda_importance_df$Importance), ]
+print(lda_importance_df)
+
+f_values <- apply(data[, -ncol(data)], 2, function(x) {
+  summary(aov(x ~ data$TenYearCHD))[[1]][["F value"]][1]
+})
+
+lda_importance_df_f <- data.frame(Feature = names(f_values), F_stat = f_values)
+lda_importance_df_f <- lda_importance_df_f[order(-lda_importance_df_f$F_stat), ]
+print(lda_importance_df_f)
+```
+Interestingly cholesterol is not very important, according to LDA coefficients, but F-statistics tells that it has greater importance.
+
+## Logistic Regression
+
+```{r}
+df_scaled <- data.frame(scaled_data, target = y)  # Combine scaled data with target
+
+lr_model <- glm(target ~ ., data = df_scaled, family = binomial)  # Logistic regression
+summary(model)
+
+# Evaluation
+pred_probs <- predict(lr_model, type = "response")  # Get probabilities
+pred_class <- ifelse(pred_probs > 0.5, 1, 0)     # Threshold at 0.5
+
+print(confusionMatrix(as.factor(pred_class), as.factor(df_scaled$target)))
+
+eval <- evalmod(scores = pred_probs, labels = as.numeric(df_scaled$target))
+
+# Plot Precision-Recall Curve
+autoplot(eval)
+```
+Once again Logistic Regression does not perform very well. We think it is due to non-linear relationships present in the data. (USE SPLINES?)
+
+```{r}
+coef_values <- coef(lr_model)
+
+importance <- abs(coef_values[-1])
+lr_importance_df <- data.frame(Feature = names(importance), Importance = importance)
+
+# Sort by importance
+lr_importance_df <- lr_importance_df[order(-lr_importance_df$Importance), ]
+print(lr_importance_df)
+summary(lr_model)
+```
+
+
+## Random Forest
+
+```{r}
+set.seed(123)  # For reproducibility
+df_scaled$target <- as.factor(data$TenYearCHD)
+rf_model <- randomForest(target ~ ., data = df_scaled, ntree = 7, mtry = sqrt(ncol(data) - 1), importance = TRUE)
+
+print(rf_model)
+```
+```{r}
+pred_probs <- predict(rf_model, df_scaled, type = "prob")[, 2]
+pred_class <- ifelse(pred_probs > 0.5, 1, 0)  # Apply 0.5 threshold
+pred_class <- as.factor(pred_class)
+
+conf_matrix <- confusionMatrix(pred_class, df_scaled$target)
+print(conf_matrix)
+
+eval <- evalmod(scores = pred_probs, labels = as.numeric(df_scaled$target))
+autoplot(eval)
+
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1_score <- conf_matrix$byClass["F1"]
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1-Score:", f1_score, "\n")
+
+varImpPlot(rf_model)
+```
+
+```{r}
+set.seed(123)  # For reproducibility
+
+# Split data into 70% training and 30% test sets
+library(caret)
+train_index <- createDataPartition(df_scaled$target, p = 0.7, list = FALSE)
+
+train_data <- df_scaled[train_index, ]
+test_data <- df_scaled[-train_index, ]
+
+rf_model <- randomForest(target ~ ., data = train_data, ntree = 7, mtry = sqrt(ncol(data) - 1), importance = TRUE)
+
+# Probabilities and labels for test data
+pred_probs_test <- predict(rf_model, test_data, type = "prob")[, 2]
+pred_class_test <- predict(rf_model, test_data)
+
+conf_matrix_test <- confusionMatrix(pred_class_test, test_data$target)
+print(conf_matrix_test)
+conf_matrix_train <- confusionMatrix(predict(rf_model, train_data), train_data$target)
+train_precision <- conf_matrix_train$byClass["Precision"]
+train_recall <- conf_matrix_train$byClass["Recall"]
+train_f1 <- conf_matrix_train$byClass["F1"]
+test_precision <- conf_matrix_test$byClass["Precision"]
+test_recall <- conf_matrix_test$byClass["Recall"]
+test_f1 <- conf_matrix_test$byClass["F1"]
+
+cat("Train Precision:", train_precision, "\n")
+cat("Train Recall:", train_recall, "\n")
+cat("Train F1:", train_f1, "\n\n")
+
+cat("Test Precision:", test_precision, "\n")
+cat("Test Recall:", test_recall, "\n")
+cat("Test F1:", test_f1, "\n")
+
+```
+
+## Gradient Boosted Model
+```{r}
+set.seed(123)  # For reproducibility
+
+df_scaled$target = as.numeric(df_scaled$target) - 1  # R....
+
+# Train GBM Model
+gbm_model <- gbm(target ~ ., 
+                 data = df_scaled, 
+                 distribution = "bernoulli",  # Binary classification
+                 n.trees = 10,             # Number of trees
+                 interaction.depth = 3,      # Depth of trees
+                 shrinkage = 0.01,           # Learning rate
+                 n.minobsinnode = 10,        # Minimum observations per node
+                 cv.folds = 5,               # Cross-validation
+                 verbose = FALSE)
+
+# Print model summary
+summary(gbm_model)
+```
+Interestingly GBM considers cholesterol as not important. Probably due to correlation with other variables.
+
+# Feature Importances
+
+```{r}
+# LDA
+print(lda_importance_df)
+print(lda_importance_df_f)
+
+# Logistic Regression
+print(lr_importance_df)
+summary(lr_model)
+
+# Random Forest
+importance(rf_model)
+varImpPlot(rf_model)
+
+# Gradient Boosted Model
+summary(gbm_model)
+```
+

@@ -1,0 +1,5 @@
+https://www.kaggle.com/datasets/kamilpytlak/personal-key-indicators-of-heart-disease/data
+
+You should treat the variable "HadHeartAttack" as binary ("Yes" - respondent had heart disease; "No" - respondent did not have heart disease). Note, however, that the classes are unbalanced, so the classic approach of applying a model is not advisable. Fixing the weights/undersampling should yield much better results.
+
+HeartDisease,BMI,Smoking,AlcoholDrinking,Stroke,PhysicalHealth,MentalHealth,DiffWalking,Sex,AgeCategory,Race,Diabetic,PhysicalActivity,GenHealth,SleepTime,Asthma,KidneyDisease,SkinCancer
