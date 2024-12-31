@@ -249,12 +249,28 @@ cat("Recall:", recall, "\n")
 cat("F1-Score:", f1, "\n")
 ```
 
+```{r}
+importance <- abs(lda_model$scaling)
+lda_importance_df <- data.frame(Feature = rownames(importance), Importance = importance[, 1])
+lda_importance_df <- lda_importance_df[order(-lda_importance_df$Importance), ]
+print(lda_importance_df)
+
+f_values <- apply(data[, -ncol(data)], 2, function(x) {
+  summary(aov(x ~ data$target))[[1]][["F value"]][1]
+})
+
+lda_importance_df_f <- data.frame(Feature = names(f_values), F_stat = f_values)
+lda_importance_df_f <- lda_importance_df_f[order(-lda_importance_df_f$F_stat), ]
+print(lda_importance_df_f)
+```
+
+
 ## logistic Regression
 ```{r collapse=FALSE}
 data <- data.frame(scaled_data, target = y)  # Combine scaled data with target
 
 lr_model <- glm(target ~ ., data = data, family = binomial)  # Logistic regression
-summary(model)
+summary(lr_model)
 
 # Evaluation
 pred_probs <- predict(lr_model, type = "response")  # Get probabilities
